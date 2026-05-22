@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Climate Event Logger</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌡️</text></svg>">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+    body{background:#0d0f12;color:#e2e8f0;font-family:'DM Sans',sans-serif;}
+    .mono{font-family:'JetBrains Mono',monospace;}
+    input,textarea{font-family:'JetBrains Mono',monospace;outline:none;border:none;}
+    button{font-family:'DM Sans',sans-serif;cursor:pointer;border:none;outline:none;}
+    button:active{transform:scale(0.94);}
+    textarea{resize:none;}
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-track{background:#0d0f12;}
+    ::-webkit-scrollbar-thumb{background:#1e232b;border-radius:2px;}
+    .flash{animation:flashIn 0.35s ease;}
+    @keyframes flashIn{0%{background:#4ecdc433;}100%{background:transparent;}}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    const STORAGE_KEY = 'climate-logger-v1';
+
+    const C = {
+      bg:"#0d0f12", panel:"#13161b", panel2:"#181c22", border:"#1e232b",
+      teal:"#4ecdc4", amber:"#f5a623", red:"#e05c5c", green:"#5ce07a",
+      purple:"#a78bfa", blue:"#60a5fa", muted:"#6b7280", dim:"#94a3b8", text:"#e2e8f0",
+    };
+
+    function nowHHMM() {
+      const edt = new Date(Date.now() - 4*60*60*1000);
+      return edt.toISOString().slice(11,16);
+    }
+    function fmt12(hhmm) {
+      if (!hhmm) return "";
+      const [hStr,mStr] = hhmm.split(":");
+      let h = parseInt(hStr,10);
+      const ampm = h>=12?"PM":"AM";
+      h = h%12||12;
+      return `${h}:${mStr} ${ampm}`;
+    }
+
+    const DEFAULT_STATE = {
+      door:0,pc:0,curtain:1,dryer:0,dh:0,
+      ac:74,acMode:"cool",outdoor:66,sky:"clear",airtap:58
+    };
+
+    function Btn({active,color,onClick,children,wide,small}){
+      return(
+        <button onClick={onClick} style={{
+          background:active?`${color}22`:"transparent",
+          border:`1.5px solid ${active?color:C.border}`,
+          borderRadius:8,color:active?color:C.dim,
+          fontSize:small?11:13,fontWeight:active?600:400,
+          padding:small?"6px 10px":"11px 14px",minHeight:small?32:48,
+          flex:wide?"1 1 auto":"0 0 auto",
+          transition:"all 0.12s ease",whiteSpace:"nowrap",
+        }}>{children}</button>
+      );
+    }
+
+    function SLabel({children,color}){
+      return(
+        <div className="mono" style={{
+          fontSize:9,fontWeight:700,letterSpacing:2,
+          color:color||C.muted,textTransform:"uppercase",marginBottom:6,
+        }}>{children}</div>
+      );
+    }
+
+    function App(){
+      const [rs,       setRs]       = useState(DEFAULT_STATE);
+      const [events,   setEvents]   = useState([]);
+      const [timeVal,  setTimeVal]  = useState(nowHHMM);
+      const [timeMode, setTimeMode] = useState("live");
+      const [noteIn,   setNoteIn]   = useState("");
+      const [outIn,    setOutIn]    = useState("");
+      const [outSrc,   setOutSrc]   = useState("live");
+      const [acIn,     setAcIn]     = useState("");
+      const [atIn,     setAtIn]     = useState("");
+      const [copyMsg,  setCopyMsg]  = useState("");
+      const [flash,    setFlash]    = useState(null);
+      const [editId,   setEditId]   = useState(null);
+      const [editT,    setEditT]    = useState("");
+      const [showRestore, setShowRestore] = useState(false);
+      const [pasteIn,     setPasteIn]     = useState("");
+      const [restoreMsg,  setRestoreMsg]  = useState("");
+      const [autoSaved,   setAutoSaved]   = useState(false);
+      const logRef = useRef(null);
+      const initRef = useRef(false);
+
+      // Load from localStorage on mount
+      useEffect(() => {
+        if (initRef.current) return;
+        initRef.current = true;
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+            const { events: e, state: s } = JSON.parse(saved);
+            if (e && Array.isArray(e)) setEvents(e);
+            if (s) setRs(prev => ({...prev, ...s}));
+          }
+        } catch (err) {
+          console.warn('Failed to load from localStorage:', err);
+        }
+      }, []);
+
+      // Save to localStorage on every change
+      useEffect(() => {
+        if (!initRef.current) return;
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ events, state: rs }));
+          setAutoSaved(true);
+          const t = setTimeout(() => setAutoSaved(false), 1500);
+          return () => clearTimeout(t);
+        } catch (err) {
+          console.warn('Failed to save to localStorage:', err);
+        }
+      }, [events, rs]);
+
+      // Live clock
+      useEffect(()=>{
+        if(timeMode!=="live") return;
+        const t=setInterval(()=>setTimeVal(nowHHMM()),15000);
+        return()=>clearInterval(t);
+      },[timeMode]);
+
+      // Auto-scroll
+      useEffect(()=>{
+        if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight;
+      },[events]);
+
+      // Core log
+      function log(label,mutate){
+        const id=Date.now()+Math.random();
+        const evt={id,time:fmt12(timeVal),rawTime:timeVal,label};
+        setEvents(prev=>[...prev,evt]);
+        if(mutate) setRs(prev=>{const n={...prev};mutate(n);return n;});
+        setFlash(id);
+        setTimeout(()=>setFlash(null),400);
+      }
+
+      // Inline time edit
+      function commitEdit(id){
+        setEvents(prev=>prev.map(e=>e.id===id?{...e,time:fmt12(editT),rawTime:editT}:e));
+        setEditId(null);setEditT("");
+      }
+      function delEvent(id){ setEvents(prev=>prev.filter(e=>e.id!==id)); }
+
+      // Export: copy full session JSON to clipboard
+      async function exportSession(){
+        const blob=JSON.stringify({events,state:rs,savedAt:fmt12(timeVal)});
+        try{
+          await navigator.clipboard.writeText(blob);
+          setCopyMsg("Session saved to clipboard");
+        }catch{ setCopyMsg("Copy failed — try again"); }
+        setTimeout(()=>setCopyMsg(""),4000);
+      }
+
+      // Import: parse pasted JSON and restore
+      function importSession(){
+        try{
+          const parsed=JSON.parse(pasteIn.trim());
+          if(!parsed.events||!Array.isArray(parsed.events)) throw new Error("no events array");
+          setEvents(parsed.events);
+          if(parsed.state) setRs(s=>({...s,...parsed.state}));
+          setRestoreMsg(`✓ Restored ${parsed.events.length} events${parsed.savedAt?" (saved "+parsed.savedAt+")":""}`);
+          setPasteIn("");
+          setTimeout(()=>{ setShowRestore(false); setRestoreMsg(""); },2000);
+        }catch(e){
+          setRestoreMsg("✗ Invalid data — paste the full text from a previous Save Session");
+        }
+      }
+
+      // Copy helpers
+      async function copy(text,msg){
+        try{ await navigator.clipboard.writeText(text); setCopyMsg(msg); }
+        catch{ setCopyMsg("Copy failed"); }
+        setTimeout(()=>setCopyMsg(""),2000);
+      }
+
+      function mdLog(){
+        if(!events.length) return "| Time EDT | Event |\n|---|---|\n| — | no events |";
+        return "| Time EDT | Event |\n|---|---|\n"+events.map(e=>`| ${e.time} | ${e.label} |`).join("\n");
+      }
+      function mdState(){
+        const{door,pc,curtain,dryer,dh,ac,acMode,outdoor,sky,airtap}=rs;
+        return[
+          `AC:        ${acMode==="off"?"off":`${ac}°F ${acMode}`}`,
+          `curtains:  ${curtain?"closed":"open"}`,
+          `door:      ${door?"open":"closed"}`,
+          `PC:        ${pc===0?"off":pc===1?"on light":"on gaming"}`,
+          `dryer:     ${dryer?"on":"off"}`,
+          `DH:        ${dh?"on":"off"}`,
+          `outdoor:   ${outdoor}°F ${sky}`,
+          `AIRTAP trigger: ${airtap}°F`,
+        ].join("\n");
+      }
+
+      const{door,pc,curtain,dryer,dh,ac,acMode,outdoor,sky,airtap}=rs;
+
+      const badges=[
+        {l:"AC",    v:acMode==="off"?"OFF":`${ac}°F`,              c:acMode==="cool"?C.teal:acMode==="heat"?C.amber:C.muted},
+        {l:"door",  v:door?"OPEN":"CLOSED",                         c:door?C.amber:C.green},
+        {l:"curt",  v:curtain?"CLOSED":"OPEN",                      c:curtain?C.muted:C.amber},
+        {l:"PC",    v:pc===0?"OFF":pc===1?"LIGHT":"GAME",          c:pc===0?C.muted:C.amber},
+        {l:"dryer", v:dryer?"ON":"OFF",                             c:dryer?C.red:C.muted},
+        {l:"DH",    v:dh?"ON":"OFF",                                c:dh?C.purple:C.muted},
+        {l:"out",   v:`${outdoor}°F`,                               c:C.dim},
+      ];
+
+      const P={background:C.panel,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8};
+
+      return(
+        <div style={{background:C.bg,minHeight:"100vh",padding:"10px 12px 80px"}}>
+          {/* Header */}
+          <div style={{marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <span className="mono" style={{color:C.teal,fontSize:11,fontWeight:700,letterSpacing:2}}>CLIMATE</span>
+              <span style={{color:C.muted,fontSize:11}}>event logger</span>
+              {autoSaved && (
+                <span style={{fontSize:10,color:C.green,marginLeft:4}}>✓ saved</span>
+              )}
+              <button onClick={()=>{setShowRestore(v=>!v);setRestoreMsg("");}}
+                style={{marginLeft:"auto",background:showRestore?`${C.purple}22`:"transparent",
+                  border:`1px solid ${showRestore?C.purple:C.border}`,borderRadius:6,
+                  color:showRestore?C.purple:C.dim,fontSize:11,padding:"4px 12px"}}>
+                {showRestore?"✕ close":"📥 Restore"}
+              </button>
+            </div>
+
+            {/* Restore panel */}
+            {showRestore&&(
+              <div style={{background:C.panel,border:`1.5px solid ${C.purple}`,borderRadius:10,
+                padding:"12px 14px",marginBottom:8}}>
+                <SLabel color={C.purple}>Restore Previous Session</SLabel>
+                <div style={{color:C.dim,fontSize:11,marginBottom:8,lineHeight:1.5}}>
+                  Paste the text you copied from a previous "Save Session" tap.
+                </div>
+                <textarea rows={3} value={pasteIn} onChange={e=>setPasteIn(e.target.value)}
+                  placeholder='{"events":[...],"state":{...},...}'
+                  style={{width:"100%",background:C.panel2,border:`1px solid ${C.border}`,
+                    borderRadius:6,color:C.text,fontSize:11,padding:"8px 10px",
+                    lineHeight:1.5,marginBottom:8}}/>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <button onClick={importSession}
+                    style={{background:`${C.purple}22`,border:`1.5px solid ${C.purple}`,
+                      borderRadius:8,color:C.purple,fontSize:13,fontWeight:600,
+                      padding:"10px 20px"}}>Import</button>
+                  <button onClick={()=>{setPasteIn("");setRestoreMsg("");}}
+                    style={{background:"transparent",border:`1px solid ${C.border}`,
+                      borderRadius:8,color:C.muted,fontSize:12,padding:"10px 14px"}}>Clear</button>
+                  {restoreMsg&&(
+                    <span style={{fontSize:11,color:restoreMsg.startsWith("✓")?C.green:C.red,
+                      fontWeight:600}}>{restoreMsg}</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* State badges */}
+            <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+              {badges.map(b=>(
+                <div key={b.l} style={{background:C.panel,border:`1px solid ${C.border}`,
+                  borderRadius:6,padding:"3px 8px",display:"flex",flexDirection:"column",
+                  alignItems:"center",minWidth:42}}>
+                  <span style={{fontSize:8,color:C.muted,letterSpacing:1}}>{b.l}</span>
+                  <span className="mono" style={{fontSize:11,fontWeight:700,color:b.c}}>{b.v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* TIME CONTROL */}
+          <div style={{...P,border:`1.5px solid ${timeMode==="manual"?C.amber:C.border}`}}>
+            <SLabel color={timeMode==="manual"?C.amber:C.muted}>
+              Log Time {timeMode==="manual"?"(manual)":"(live)"}
+            </SLabel>
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <input type="time" value={timeVal}
+                onChange={e=>{setTimeVal(e.target.value);setTimeMode("manual");}}
+                style={{background:C.panel2,
+                  border:`1.5px solid ${timeMode==="manual"?C.amber:C.border}`,
+                  borderRadius:8,padding:"8px 12px",
+                  color:timeMode==="manual"?C.amber:C.teal,
+                  fontSize:20,fontWeight:700,flexShrink:0}}/>
+              <span style={{color:C.dim,fontSize:13,fontWeight:500}}>{fmt12(timeVal)} EDT</span>
+              {timeMode==="manual"&&(
+                <button onClick={()=>{setTimeVal(nowHHMM());setTimeMode("live");}}
+                  style={{marginLeft:"auto",background:`${C.teal}18`,border:`1px solid ${C.teal}`,
+                    borderRadius:6,color:C.teal,fontSize:11,padding:"6px 12px"}}>↻ Now</button>
+              )}
+            </div>
+            {timeMode==="manual"&&(
+              <div style={{marginTop:6,fontSize:10,color:C.amber}}>
+                ⚠ All taps log as {fmt12(timeVal)} EDT
+              </div>
+            )}
+          </div>
+
+          {/* DOOR */}
+          <div style={P}>
+            <SLabel color={C.teal}>Door</SLabel>
+            <div style={{display:"flex",gap:8}}>
+              <Btn wide active={door===0} color={C.green}
+                onClick={()=>{if(door!==0)log("Door closed",s=>{s.door=0;});}}>● Closed</Btn>
+              <Btn wide active={door===1} color={C.amber}
+                onClick={()=>{if(door!==1)log("Door open",s=>{s.door=1;});}}>○ Open</Btn>
+            </div>
+          </div>
+
+          {/* PC */}
+          <div style={P}>
+            <SLabel color={C.amber}>PC Load</SLabel>
+            <div style={{display:"flex",gap:8}}>
+              <Btn wide active={pc===0} color={C.muted}
+                onClick={()=>{if(pc!==0)log("PC off",s=>{s.pc=0;});}}>Off</Btn>
+              <Btn wide active={pc===1} color={C.amber}
+                onClick={()=>{if(pc!==1)log("PC on light",s=>{s.pc=1;});}}>Light</Btn>
+              <Btn wide active={pc===2} color={C.red}
+                onClick={()=>{if(pc!==2)log("PC on gaming",s=>{s.pc=2;});}}>Gaming</Btn>
+            </div>
+          </div>
+
+          {/* CURTAIN */}
+          <div style={P}>
+            <SLabel color={C.dim}>Curtain</SLabel>
+            <div style={{display:"flex",gap:8}}>
+              <Btn wide active={curtain===0} color={C.amber}
+                onClick={()=>{if(curtain!==0)log("Curtains open",s=>{s.curtain=0;});}}>○ Open</Btn>
+              <Btn wide active={curtain===1} color={C.muted}
+                onClick={()=>{if(curtain!==1)log("Curtains closed",s=>{s.curtain=1;});}}>● Closed</Btn>
+            </div>
+          </div>
+
+          {/* DRYER + DH */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div style={{...P,marginBottom:0}}>
+              <SLabel color={C.red}>Dryer</SLabel>
+              <div style={{display:"flex",gap:6}}>
+                <Btn wide active={dryer===1} color={C.red}
+                  onClick={()=>{if(!dryer)log("Dryer on",s=>{s.dryer=1;});}}>On</Btn>
+                <Btn wide active={dryer===0} color={C.muted}
+                  onClick={()=>{if(dryer)log("Dryer off",s=>{s.dryer=0;});}}>Off</Btn>
+              </div>
+            </div>
+            <div style={{...P,marginBottom:0}}>
+              <SLabel color={C.purple}>DH</SLabel>
+              <div style={{display:"flex",gap:6}}>
+                <Btn wide active={dh===1} color={C.purple}
+                  onClick={()=>{if(!dh)log("DH on",s=>{s.dh=1;});}}>On</Btn>
+                <Btn wide active={dh===0} color={C.muted}
+                  onClick={()=>{if(dh)log("DH off",s=>{s.dh=0;});}}>Off</Btn>
+              </div>
+            </div>
+          </div>
+
+          {/* AC */}
+          <div style={P}>
+            <SLabel color={C.green}>AC Setpoint</SLabel>
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              {["cool","heat","off"].map(m=>(
+                <Btn key={m} wide small active={acMode===m}
+                  color={m==="cool"?C.teal:m==="heat"?C.amber:C.muted}
+                  onClick={()=>{
+                    if(acMode!==m) log(m==="off"?"AC off":`AC ${ac}°F ${m}`,s=>{s.acMode=m;});
+                  }}>{m.charAt(0).toUpperCase()+m.slice(1)}</Btn>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+              {[72,73,74,75,76].map(v=>(
+                <Btn key={v} active={ac===v&&acMode!=="off"} color={C.teal}
+                  onClick={()=>{
+                    const nm=acMode==="off"?"cool":acMode;
+                    if(ac!==v||acMode==="off")
+                      log(`AC ${v}°F ${nm}`,s=>{s.ac=v;if(s.acMode==="off")s.acMode="cool";});
+                  }}>{v}°F</Btn>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <input type="number" placeholder="custom °F" value={acIn}
+                onChange={e=>setAcIn(e.target.value)}
+                style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,
+                  color:C.teal,fontSize:13,padding:"8px 10px",width:110}}/>
+              <Btn color={C.teal} onClick={()=>{
+                const v=parseFloat(acIn);
+                if(!isNaN(v)&&v>60&&v<90){
+                  log(`AC ${v}°F ${acMode==="off"?"cool":acMode}`,s=>{s.ac=v;if(s.acMode==="off")s.acMode="cool";});
+                  setAcIn("");
+                }
+              }}>Set</Btn>
+            </div>
+          </div>
+
+          {/* OUTDOOR */}
+          <div style={P}>
+            <SLabel color={C.amber}>Outdoor Temp</SLabel>
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              {[["live","Live ✓"],["strip","Strip"],["details","Details"]].map(([k,l])=>(
+                <Btn key={k} small active={outSrc===k} color={C.amber}
+                  onClick={()=>setOutSrc(k)}>{l}</Btn>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:5,marginBottom:8,flexWrap:"wrap"}}>
+              {[["clear","Clear"],["partly","Partly"],["mostly","Mostly"],["overcast","Ovrcst"]].map(([k,l])=>(
+                <Btn key={k} small active={sky===k} color={C.dim}
+                  onClick={()=>setRs(s=>({...s,sky:k}))}>{l}</Btn>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <input type="number" placeholder="°F" value={outIn}
+                onChange={e=>setOutIn(e.target.value)}
+                style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,
+                  color:C.amber,fontSize:13,padding:"8px 10px",width:90}}/>
+              <Btn color={C.amber} onClick={()=>{
+                const v=parseFloat(outIn);
+                if(!isNaN(v)&&v>20&&v<120){
+                  const src=outSrc==="live"?"(KNCCHAL42 live)":outSrc==="strip"?"(Carrot strip)":"(Carrot Details)";
+                  log(`Outdoor ${v}°F ${sky} ${src}`,s=>{s.outdoor=v;});
+                  setOutIn("");
+                }
+              }}>Log</Btn>
+              <div style={{display:"flex",gap:4,marginLeft:"auto",alignItems:"center"}}>
+                <Btn small color={C.muted}
+                  onClick={()=>log(`Outdoor ${outdoor-1}°F ${sky} (adjusted)`,s=>{s.outdoor=s.outdoor-1;})}>−1</Btn>
+                <span className="mono" style={{color:C.amber,fontSize:13,padding:"0 4px"}}>{outdoor}°F</span>
+                <Btn small color={C.muted}
+                  onClick={()=>log(`Outdoor ${outdoor+1}°F ${sky} (adjusted)`,s=>{s.outdoor=s.outdoor+1;})}>+1</Btn>
+              </div>
+            </div>
+          </div>
+
+          {/* AIRTAP */}
+          <div style={P}>
+            <SLabel color={C.blue}>AIRTAP Trigger</SLabel>
+            <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+              {[55,58,59,64].map(v=>(
+                <Btn key={v} small active={airtap===v} color={C.blue}
+                  onClick={()=>{if(airtap!==v)log(`AIRTAP trigger → ${v}°F`,s=>{s.airtap=v;});}}>{v}°F</Btn>
+              ))}
+              <input type="number" placeholder="°F" value={atIn}
+                onChange={e=>setAtIn(e.target.value)}
+                style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,
+                  color:C.blue,fontSize:12,padding:"6px 8px",width:70,marginLeft:4}}/>
+              <Btn small color={C.blue} onClick={()=>{
+                const v=parseFloat(atIn);
+                if(!isNaN(v)&&v>40&&v<80){log(`AIRTAP trigger → ${v}°F`,s=>{s.airtap=v;});setAtIn("");}
+              }}>Set</Btn>
+            </div>
+          </div>
+
+          {/* NOTE */}
+          <div style={P}>
+            <SLabel>Custom Note</SLabel>
+            <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
+              <textarea rows={2} placeholder="free text event…" value={noteIn}
+                onChange={e=>setNoteIn(e.target.value)}
+                onKeyDown={e=>{
+                  if(e.key==="Enter"&&!e.shiftKey){
+                    e.preventDefault();
+                    if(noteIn.trim()){log(noteIn.trim());setNoteIn("");}
+                  }
+                }}
+                style={{flex:1,background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,
+                  color:C.text,fontSize:12,padding:"8px 10px",lineHeight:1.5}}/>
+              <Btn color={C.teal}
+                onClick={()=>{if(noteIn.trim()){log(noteIn.trim());setNoteIn("");}}}>Log</Btn>
+            </div>
+          </div>
+
+          {/* EVENT LOG */}
+          <div style={P}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <SLabel style={{marginBottom:0}}>Event Log</SLabel>
+              <span className="mono" style={{fontSize:10,color:C.muted}}>
+                {events.length} event{events.length!==1?"s":""}
+              </span>
+              <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+                <button onClick={()=>setEvents([])}
+                  style={{background:"transparent",color:C.muted,fontSize:11,
+                    padding:"2px 8px",border:`1px solid ${C.border}`,borderRadius:5}}>✕ clear</button>
+              </div>
+            </div>
+
+            {/* Entries */}
+            <div ref={logRef} style={{maxHeight:280,overflowY:"auto",background:C.panel2,
+              borderRadius:8,padding:events.length?"4px 0":0,marginBottom:10}}>
+              {events.length===0?(
+                <div style={{color:C.muted,fontSize:11,padding:"14px",textAlign:"center"}}>
+                  No events yet
+                </div>
+              ):events.map((e,i)=>(
+                <div key={e.id} className={e.id===flash?"flash":""}
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",
+                    borderBottom:i<events.length-1?`1px solid ${C.border}33`:"none"}}>
+
+                  {editId===e.id?(
+                    <div style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
+                      <input type="time" value={editT} autoFocus
+                        onChange={ev=>setEditT(ev.target.value)}
+                        onKeyDown={ev=>{
+                          if(ev.key==="Enter")commitEdit(e.id);
+                          if(ev.key==="Escape")setEditId(null);
+                        }}
+                        style={{background:C.panel,border:`1.5px solid ${C.amber}`,borderRadius:5,
+                          color:C.amber,fontSize:11,padding:"3px 6px",width:100}}/>
+                      <button onClick={()=>commitEdit(e.id)}
+                        style={{background:`${C.green}22`,border:`1px solid ${C.green}`,
+                          borderRadius:4,color:C.green,fontSize:10,padding:"2px 8px"}}>✓</button>
+                      <button onClick={()=>setEditId(null)}
+                        style={{background:"transparent",border:`1px solid ${C.border}`,
+                          borderRadius:4,color:C.muted,fontSize:10,padding:"2px 6px"}}>✕</button>
+                    </div>
+                  ):(
+                    <button onClick={()=>{setEditId(e.id);setEditT(e.rawTime||"");}}
+                      title="Tap to edit time" className="mono"
+                      style={{background:"transparent",border:"none",padding:0,cursor:"pointer",
+                        color:C.teal,fontSize:11,flexShrink:0,minWidth:68,textAlign:"left",
+                        borderBottom:`1px dashed ${C.border}55`}}>
+                      {e.time}
+                    </button>
+                  )}
+
+                  <span style={{color:C.text,fontSize:11,lineHeight:1.4,flex:1}}>{e.label}</span>
+                  <button onClick={()=>delEvent(e.id)}
+                    style={{background:"transparent",border:"none",color:C.muted,
+                      fontSize:13,padding:"0 2px",flexShrink:0,opacity:0.4}}>✕</button>
+                </div>
+              ))}
+            </div>
+
+            {/* Action buttons */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+              <button onClick={()=>copy(mdLog(),"Log copied!")} style={{
+                flex:"1 1 auto",background:`${C.teal}18`,border:`1.5px solid ${C.teal}`,
+                borderRadius:8,color:C.teal,fontSize:12,fontWeight:600,padding:"10px 12px"}}>
+                📋 Copy Log
+              </button>
+              <button onClick={()=>copy(mdState(),"State copied!")} style={{
+                flex:"1 1 auto",background:`${C.amber}18`,border:`1.5px solid ${C.amber}`,
+                borderRadius:8,color:C.amber,fontSize:12,fontWeight:600,padding:"10px 12px"}}>
+                📄 Copy State
+              </button>
+              <button onClick={exportSession} style={{
+                flex:"1 1 auto",background:`${C.purple}18`,border:`1.5px solid ${C.purple}`,
+                borderRadius:8,color:C.purple,fontSize:12,fontWeight:600,padding:"10px 12px"}}>
+                💾 Save Session
+              </button>
+            </div>
+
+            {copyMsg&&(
+              <div style={{background:`${C.green}18`,border:`1px solid ${C.green}`,borderRadius:6,
+                padding:"8px 12px",color:C.green,fontSize:11,fontWeight:600,marginBottom:8,lineHeight:1.5}}>
+                ✓ {copyMsg}
+              </div>
+            )}
+
+            {events.length>0&&(
+              <pre style={{background:C.panel2,borderRadius:6,padding:"8px 10px",
+                fontSize:10,color:C.dim,overflowX:"auto",lineHeight:1.7,whiteSpace:"pre-wrap"}}>
+                {mdLog()}
+              </pre>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
